@@ -79,6 +79,7 @@ function Datastore.Get(datastore: GlobalDataStore | string, key: number | string
 		
 		if not success then
 			warn(`[Datastore] Get Failed '{tostring(datastore.Name)}'/'{tostring(key)}': {(tostring(returnedValue))}`) 
+			continue
 		end
 		
 		return returnedValue, true, v22
@@ -109,6 +110,7 @@ function Datastore.Set(datastore: GlobalDataStore | string, key: number | string
 		
 		if not success then
 			warn(`[Datastore] Set Failed '{tostring(datastore.Name)}'/'{tostring(key)}': {(tostring(result))}`) 
+			continue
 		end
 		
 		return true, result
