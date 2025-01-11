@@ -3,7 +3,8 @@
     The original Saving module from BIG Games official files are buggy,
     for this game file, probably because of decompilers,
     so my solution was to make an entirely safe
-    Saving module, think of this module as just SecureSaving.luau
+    Saving module, think of this module as just SecureSaving.luau.
+    Depreached as of 1/11/2025
     
     The most hacky but (somehow) secure way data is stored, recievied, and saved. Not very pretty, but it gets the job done.
 	Most specific 'saving' issues are taken acount for - and have been tested to work in real scenerios. If data fails to save, recieve, etc.
