@@ -31,3 +31,5 @@
                     `"""`            
 BIG Copies luau rescripts
 Written by @LocalOnex
+Some custom scripts may be included here!
+All open source! Please if you use something, leave the credits at the top!
