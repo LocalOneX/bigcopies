@@ -1,55 +1,5 @@
---[[
-    By: @LocalOneX  1/4/2025
-    The original Saving module from BIG Games official files are buggy,
-    for this game file, probably because of decompilers,
-    so my solution was to make an entirely safe
-    Saving module, think of this module as just SecureSaving.luau.
-    Depreached as of 1/11/2025
-    
-    The most hacky but (somehow) secure way data is stored, recievied, and saved. Not very pretty, but it gets the job done.
-	Most specific 'saving' issues are taken acount for - and have been tested to work in real scenerios. If data fails to save, recieve, etc.
-	server and client will get warning and messages accordingly. Very efficient on datastore requests.
-	
-	Default stats are found under _L.Settings on Server.
-	===========
-		\\\ Get player's data
-		Saving.Get(
-			player,					<-- |REQ|	Player instance
-		)
-		
-		\\\ Returns true if player is loaded (past intro)
-		Saving.IsLoaded(
-			player,					<-- |REQ|	Player instance
-		)
-		
-		\\\ Save player's data to DataStore
-		Saving.Save(
-			player,					<-- |REQ|	Player instance
-		)
-		
-		\\\ Load player's data from DataStore
-		Saving.Retrieve(
-			player,					<-- |REQ|	Player instance
-		)
-		
-		\\\ Reset the player's data back to default stats
-		Saving.Reset(
-			player,					<-- |REQ|	Player instance
-		)
-		
-		\\\ Clears player's data from local server manually
-		Saving.Remove(
-			player,					<-- |REQ|	Player instance
-		)
-		
-		\\\ Initialize player's data. [For internal use only! Don't use this pls]
-		Saving.Init(
-			player,					<-- |REQ|	Player instance
-		)
-	===========
---]]
-
-assert(game:GetService("RunService"):IsServer())
+---@LocalOneX
+assert(game:GetService("RunService"):IsServer(), "[SAVING] REQUIRED ON CLIENT???")
 local Settings = require(game.ServerScriptService.Library.Settings)
 local Network = require(game.ServerScriptService.Library.Network)
 local Migration = require(game.ServerScriptService.Library.Migration)
@@ -88,212 +38,25 @@ local saveDuration = 120
 local sessionLockBuffer = 120
 local autoSaveBuffer = (60)*10
 local StudioSaving = true
-local Debug = false
+local Debug = true
 local WaitLoaded = true -- If enabled, it will wait until player is loaded before PlayerAdded event is fired.
 local SavePlayerID = Settings.SavePlayerID
 local DefaultStats = Settings.DefaultStats
-local ReplicateStatsBuffer = (Settings.ReplicateOtherStatsInstantly) and 0 or Settings.ReplicateOtherStatsBuffer or 0.33
+local ReplicateStatsBuffer = 0.33  
 local StatsNetworkingBlacklist = Settings.StatsNetworkingBlacklist
 local StatsNetworkingUpdateBlacklist = Settings.StatsNetworkingUpdateBlacklist
 local StatsNetworkingLocalOnly = Settings.StatsNetworkingLocalOnly
 if not isStudio or SavePlayerID == 0 then
 	SavePlayerID = nil
-end
-
---- Globals
-local wait = task.wait
-local spawn = task.spawn
-local delay = task.delay
-local wrap = coroutine.wrap
-local clock = os.clock
-local time = os.time
-local profilebegin = debug.profilebegin
-local profileend = debug.profileend
-local random = math.random
-local unpack = table.unpack
-local max = math.max
+end 
 
 --- Variables
 local storage = {}
 local leavingStorage = {}
-local loadedStorage = {}
+local loadedStorage = {} 
 
---- Internal
-
---local function optionalAssert(value, callback, message) --- Moved to _L.Asserts
---	if value == nil then
---		return
---	end
---	
---	assert(callback(value), message)
---end
-
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
---[[ 
-    Vanilla datastores are horrible. They suffer from random throttling, unexplained errors, and several other issues that normally go undiagnosed.
-	Because of this, get/set/update invokes may go ignored or even reset datastore keys. To fix this, you should funnel all datastore requests
-	through this module. Specifically, this:
-	- Avoids initial failures
-	- Prevents overriding keys with nil/blank
-	- Queues similar requests to avoid throttling
-	- Re-attempts failed invokes
-	- Wraps invokes in pcalls for worst case scenerios
-	- Returns proper arguments
-	
-	===========
-		\\\ Alternative to GetAsync(). Returns: result, success
-		SecureDatastore.Get(
-			key,					<-- |REQ|	Async key (str)
-			yield,					<-- 		How many attempts/tries (number)							[defaults to: 1]
-			scope,					<-- 		Scope of datastore (str)									[defaults to: nil]
-		)
-		
-		\\\ Alternative to SetAsync(). Returns: success
-		SecureDatastore.Set(
-			key,					<-- |REQ|	Async key (str)
-			value,					<-- |REQ|	New value for async
-			yield,					<-- 		How many attempts/tries (number)							[defaults to: 1]
-			scope,					<-- 		Scope of datastore (str)									[defaults to: nil]
-		)
-		
-		\\\ Alternative to UpdateAsync(). Returns: success
-		SecureDatastore.Update(
-			key,					<-- |REQ|	Async key (str)
-			function,				<-- |REQ|	Update function
-			yield,					<-- 		How many attempts/tries (number)							[defaults to: 1]
-			scope,					<-- 		Scope of datastore (str)									[defaults to: nil]
-		)
-			EX:  SecureDatastore.Update(datastore, "player1", function(oldValue)  return oldValue*2  end)
-	===========
---]]
 local datastore = DatastoreService:GetDataStore(Settings.StatsVersion or "NonSave0", nil, DatastoreOptions)
-local SecureDatastore = {}
-SecureDatastore.MEMORY_STORE_SORTED_MAP_MAX_EXPIRATION = 3888000
-
-local function keyFor(key: string|number): string
-	if typeof(key) == "string" then
-		return key
-	end
-
-	assert(typeof(key) == "number", "[Saving.Datastore] key must be a string|number")
-	return tostring(key)
-end
-
-local delays = {1, 6, 15, 30, 60}
-local function computeDelay(yield)
-	return delays[math.clamp(math.round(yield), 1, #delays)]
-end
-
-function SecureDatastore.Get(key: string|number, yield: number?, scope: string): (any, boolean, any)
-	--- Variables
-	local key = keyFor(key)
-	assert(datastore:IsA("GlobalDataStore"), "[Saving.Datastore] datastore must be a GlobalDataStore or string [1]")
-	--
-	yield = (yield or 1)
-
-	--- Attempt It
-	for attempt = 1, yield::number do
-		if attempt > 1 then
-			wait(computeDelay(attempt - 1))
-		end
-
-		local success, returnedValue, metaData = pcall(function()
-			return datastore:GetAsync(key)
-		end)
-
-		if not success then
-			warn(`[Saving.Datastore] Get Failed '{tostring(key)}': {(tostring(returnedValue))}`) 
-			continue
-		end
-
-		return returnedValue, true, metaData
-	end
-
-	warn(`[Saving.Datastore] Failed to Get '{tostring(key)}'`)
-	return nil, false, nil
-end
-
-function SecureDatastore.Set(key: string|number, value: any, yield: number?, scope: string?): (boolean, any)
-	--- Variables
-	local key = keyFor(key)
-	assert(datastore:IsA("GlobalDataStore"), "[Saving.Datastore] datastore must be a GlobalDataStore or string [1]")
-	--
-	yield = (yield or 1)
-
-	--- Attempt It
-	for attempt = 1, yield::number do
-		if attempt > 1 then
-			wait(computeDelay(attempt - 1))
-		end
-
-		local success, result = pcall(function()
-			return datastore:SetAsync(key, value)
-		end)
-
-		if not success then
-			warn(`[Saving.Datastore] Set Failed '{tostring(key)}': {(tostring(result))}`) 
-			continue
-		end
-
-		return true, result
-	end
-
-	warn(`[Saving.Datastore] Failed to Set '{tostring(key)}'`)
-	return false, nil
-end
-
-function SecureDatastore.Update(key: string|number, updateFunction, yield: number?, scope: string?): (boolean, any, any)
-	assert(typeof(updateFunction) == "function", "[Datastore] updateFunction must be a function")
-
-	--- Variables
-	local key = keyFor(key)
-	assert(datastore:IsA("GlobalDataStore"), "[Saving.Datastore] datastore must be a GlobalDataStore or string [1]")
-	--
-	yield = (yield or 1)
-
-	--- Attempt It
-	for attempt = 1, yield::number do
-		if attempt > 1 then
-			wait(computeDelay(attempt - 1))
-		end
-
-		local new = false
-		local success, result, metaData = pcall(function()
-			return datastore:UpdateAsync(key, function(oldValue, keyInfo)
-				local innerSuccess, returnedValue, a, b = pcall(updateFunction, oldValue, keyInfo)
-				if not innerSuccess then
-					warn(`[Saving.Datastore] Update Failed INNER '{tostring(key)}': {(tostring(returnedValue))}`)
-					return nil
-				end
-
-				if returnedValue == nil then
-					new = true
-					return nil
-				end
-
-				return returnedValue, a, b
-			end)
-		end)
-
-		if new then
-			return false, nil, nil
-		end
-
-		if not success then
-			warn(`[Saving.Datastore] Update Failed '{tostring(key)}': {(tostring(result))}`) 
-			continue
-		end
-
-		return true, result, metaData
-	end
-
-	warn(`[Saving.Datastore] Failed to Update '{tostring(key)}'`)
-	return false, nil
-end
-
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+local Datastore = require(game.ServerScriptService.Library.Datastore) 
 
 local function _player(player: Player|string|number): (number, string)
 	if typeof(player) == "string" then
@@ -318,8 +81,7 @@ local module = {
 	StatChanged = StatChanged,
 	PlayerSaveRemoved = PlayerSaveRemoved,
 	PlayerFullyRemoved = PlayerFullyRemoved
-}
-
+} 
 
 function module.Save(player, playerLeaving, customSave)
 	if typeof(player) == "string" then
@@ -330,7 +92,7 @@ function module.Save(player, playerLeaving, customSave)
 	Asserts.optional.boolean(playerLeaving, "[Saving] playerLeaving must be a boolean or nil")
 	Asserts.optional.table(customSave, "[Saving] customSave must be a table or nil")
 
-	local userId, strId = _player(player)
+	local userId, name = _player(player)
 	local stats = customSave or storage[userId]
 	if isStudio and not StudioSaving then
 		task.wait()
@@ -342,7 +104,7 @@ function module.Save(player, playerLeaving, customSave)
 
 	if stats ~= nil then
 		local trackback = debug.traceback()
-		local success = SecureDatastore.Update(SavePlayerID or userId, function(oldSave: any)
+		local success = Datastore.Update(datastore, SavePlayerID or userId, function(oldSave: any)
 			if not oldSave then
 				warn("[SAVING] Save FAILED: oldSave was nil! User:", SavePlayerID or userId, trackback);
 				return nil; 
@@ -366,7 +128,7 @@ function module.Save(player, playerLeaving, customSave)
 				end; 
 			end 
 
-			stats.LastSaveTimestamp = clock()
+			stats.LastSaveTimestamp = os.clock()
 
 			if playerLeaving then
 				stats.PlayingSession = false
@@ -398,7 +160,7 @@ function module.Save(player, playerLeaving, customSave)
 	end
 
 	warn("[SAVING] Failed to save " .. tostring(userId) .. "'s stats");
-	spawn(function()
+	task.spawn(function()
 		local instance;
 		if typeof(player) == "Instance" and player:IsA("Player") then
 			instance = player
@@ -442,6 +204,7 @@ function module.GetSafe(player, yield)
 	end
 
 	local save = module.Get(player, yield)
+	---
 	return save
 end
 
@@ -463,7 +226,7 @@ function module.TrySafeSaveAll(players, yield)
 	local saveCount = 0
 	local safeFailed = false
 	for _, player in ipairs(players) do
-		spawn(function()
+		task.spawn(function()
 			if module.SafeSave(player) then
 				saveCount = saveCount + 1
 			else
@@ -473,7 +236,7 @@ function module.TrySafeSaveAll(players, yield)
 	end
 
 	yield = yield or 20
-	local _s = clock()
+	local _s = os.clock()
 	while true do
 		if safeFailed then
 			return false
@@ -484,11 +247,11 @@ function module.TrySafeSaveAll(players, yield)
 		end
 
 		if #players > saveCount then
-			if yield <= clock() - _s then
+			if yield <= os.clock() - _s then
 				return false
 			end
 
-			wait(0.1)
+			task.wait(0.1)
 		end
 
 		return true
@@ -527,7 +290,7 @@ function module.SafeSave(player, yield)
 			break
 		end
 
-		local save = SecureDatastore.Get(userId)
+		local save = Datastore.Get(datastore, userId)
 		if save and save.SafeSaveToken == token then
 			return true
 		end
@@ -552,7 +315,7 @@ function module.Retrieve(player)
 		local userId = SavePlayerID or userId
 		local sessionLock = false
 		--
-		local success = SecureDatastore.Update(userId, function(stats) 
+		local success = Datastore.Update(datastore, userId, function(stats) 
 			if stats ~= nil and typeof(stats) ~= "table" then
 				if 
 					not pcall(function() 
@@ -584,7 +347,7 @@ function module.Retrieve(player)
 			end
 
 			if not (isStudio and not StudioSaving) and (save.PlayingSession or save.Sessionid and save.SessionId ~= sessionId) then
-				if save.LastSaveTimestamp and time() - save.LastSaveTimestamp < sessionLockBuffer or not save.LastSaveTimestamp then  
+				if save.LastSaveTimestamp and os.time() - save.LastSaveTimestamp < sessionLockBuffer or not save.LastSaveTimestamp then  
 					sessionLock = true
 					return nil
 				end
@@ -593,7 +356,7 @@ function module.Retrieve(player)
 			end
 
 			if not (isStudio and not StudioSaving) then
-				save.LastSaveTimestamp = time()
+				save.LastSaveTimestamp = os.time()
 				save.PlayingSession = true
 				save.SessionId = sessionId
 			end
@@ -605,7 +368,7 @@ function module.Retrieve(player)
 
 		if not success then
 			retrievedStats = false
-			warn("[SAVING] Failed to retrieve save for " .. tostring(userId) .. ": SecureDatastores request failed. Trying again (" .. attempts .. "/6)");
+			warn("[SAVING] Failed to retrieve save for " .. tostring(userId) .. ": Datastores request failed. Trying again (" .. attempts .. "/6)");
 		end
 
 		if retrievedStats then
@@ -620,36 +383,42 @@ function module.Retrieve(player)
 		return false, false, nil
 	end
 
+	--
 	return true, newPlayer, savedStats
 end
 
 function module.Init(player)
-	assert(typeof(player) == "Instance" and player:IsA("Player"), "[Saving] player must be a Player")
+	assert(typeof(player) == "Instance" and player:IsA("Player"), "[Saving] player must be a Player") 
+	local userId = player.UserId 
 
-	local userId = player.UserId
-
+	--- Make sure a player cannot init twice.
 	if loadedStorage[userId] then
 		return false
 	end
 
 	loadedStorage[userId] = true
 
-	local function InitPlayer()
+	local function InitPlayer() 
+		--- Wait for any previous stats to be cleaned up (if player rejoins the same server too quickly) 
 		while (storage[userId] ~= nil) or (leavingStorage[userId] and player and player.Parent) do  RunService.Heartbeat:Wait() end 
-
+		 
 		if storage[userId] == nil and not leavingStorage[userId] and player and player.Parent then
+			--- Retrieve stats
 			local success, newPlayer, stats = module.Retrieve(player)
+
+			--- Stats returned as error!
 			if not success or stats == nil then
 				warn("[SAVING] _L.Saving.Init | MAJOR ERROR: Stats returned error for " .. tostring(userId));
 				return false
 			end
-
+			 
 			assert(stats)
 			if not player or not player.Parent then
 				module.Save(player or userId, true, stats)
 				return false
 			end
 
+			--- Add any new stats that player didn't have prior
 			for k, v in pairs(DefaultStats) do
 				if stats[k] == nil then
 					stats[k] = Functions.DeepCopyUnsafe(v)
@@ -666,91 +435,76 @@ function module.Init(player)
 				print("[SAVING] save: ",stats)
 			end
 
-			spawn(function()
+			--[[task.spawn(function()
 				if WaitLoaded then
 					while not module.IsLoaded(player) do
-						wait()
+						task.wait()
 					end
 				end
 
 				PlayerAdded:FireAsync(player, newPlayer)
-			end)
+			end)]]--
 
 			player:SetAttribute("NewPlayer", newPlayer == true)
-			local _s = clock()  
-			local dataToSend = {}
-			local cachedStats = {}
-			while (player and player.Parent) and (storage[userId]) and (not leavingStorage[userId]) do 
-				local newData = {}
-				for statName, statValue in pairs(storage[userId]) do
-					if not Settings.StatsNetworkingBlacklist[statName] then
-						local cachedStatValue = cachedStats[statName]
-						local isTable = type(statValue) == "table"
-						if cachedStatValue == nil then
-							if isTable then
-								cachedStats[statName] = Functions.CloneTable(statValue, false)
-								table.insert(newData, {statName, Functions.CloneTable(statValue, false)})
-								table.insert(dataToSend, {statName, Functions.CloneTable(statValue, false)})
-							else 
-								cachedStats[statName] = statValue 
-								table.insert(newData, {statName, statValue})
-								table.insert(dataToSend, {statName, statValue})
-							end
-							StatChanged:FireAsync(player, statName)
-						elseif isTable then
-							if not Functions.CompareTable(statValue, cachedStatValue) then 
-								cachedStats[statName] = Functions.CloneTable(statValue, false) 
-								table.insert(newData, {statName, Functions.CloneTable(statValue, false)})
-								table.insert(dataToSend, {statName, Functions.CloneTable(statValue, false)})
-								StatChanged:FireAsync(player, statName)
-							end
-						elseif statValue ~= cachedStatValue then 
-							cachedStats[statName] = statValue 
-							table.insert(newData, {statName, statValue})
-							table.insert(dataToSend, {statName, statValue})
-							StatChanged:FireAsync(player, statName)
-						end
+
+			--- Let client know when stat(s) change
+			local _s = os.clock()    
+			local dataToSend = {} 
+			while player and player.Parent and storage[userId] == stats and not leavingStorage[userId] do  
+				local localDataToSend = {}
+				for key, localValue in pairs(storage[userId]) do
+					if not Settings.StatsNetworkingBlacklist[key] and not Settings.StatsNetworkingUpdateBlacklist[key] then
+						local cachedlocalValue = prevLocalSave[key] 
+						if not Functions.DeepEqualsUnsafe(cachedlocalValue, localValue) then 
+							local value = Functions.DeepCopyUnsafe(localValue)
+
+							table.insert(localDataToSend, {key, value}) 
+							if not Settings.StatsNetworkingLocalOnly[key]  then
+								table.insert(dataToSend, {key, value})
+							end 
+
+							prevLocalSave[key] = value 
+							StatChanged:FireAsync(player, key)
+						end 
 					end
-				end
+				end 
 
-				if next(newData) then
-					Network.Fire("New Stats", player, newData, player)
-				end
+				if next(localDataToSend) then
+					Network.Fire("New Stats", player, localDataToSend, player)
+				end  
 
-				if ReplicateStatsBuffer <= os.clock() - _s and Functions.DictionaryLength(dataToSend) > 0 then
-					_s = os.clock()
+				if next(dataToSend) then 
 					for _, p in ipairs(game.Players:GetPlayers()) do
-						if p ~= player then
-							coroutine.wrap(function()
-								Network.Fire("New Stats", p, dataToSend, player)
-							end)()
+						if p ~= player then 
+							task.wait()
+							Network.Fire("New Stats", p, dataToSend, player) 
 						end							
 					end
 					dataToSend = {}
 				end
-				RunService.Heartbeat:Wait()	
-			end
 
+				task.wait(0.33 + (0.25 + math.random() * 0.5));
+			end; 
 			return true
 		end
 	end
 
+	--- Attempt to initialize stats
 	local attempts = 0
 	local success = false
-
-	--while (attempts < 3) and (player ~= nil) and (typeof(player) ~= "Instance" or not player:IsA("Player") or player.Parent) do
 	while (not success and attempts < 3 and player and player.Parent) do
 		success = InitPlayer()
 		RunService.Heartbeat:Wait()
-
+		--
 		if success then
 			break
 		end
 
 		attempts = attempts + 1
-		wait(0.5)
-	end
+		task.wait(0.5)
+	end 
 
+	--- Let player know stats failed to initialize
 	if not success then
 		warn("[SAVING] MAJOR ERROR: Could not init "..tostring(userId).."'s stats!")
 		if player then
@@ -783,9 +537,9 @@ function module.Get(player, yield, bypassRecentlyLeft)
 	--- If failed, attempt to get it again (5 tries)
 	if not stats then
 		pcall(function()
-			local _s = clock()
+			local _s = os.clock()
 			if yield == true then
-				while not stats and clock() - _s <= 5 and player and player.Parent do
+				while not stats and os.clock() - _s <= 5 and player and player.Parent do
 					RunService.Heartbeat:Wait()
 
 					stats = storage[userId]
@@ -844,7 +598,7 @@ function module.Remove(player)
 	local success = pcall(function()
 		storage[userId] = nil
 		if not isStudio then
-			wait(10)
+			task.wait(10)
 		end
 		leavingStorage[userId] = nil
 	end)
@@ -899,7 +653,7 @@ local function PlayerAdded(player)
 	assert(typeof(player) == "Instance" and player:IsA("Player"), "[Saving] player must be a Player")
 
 	--- Player joined! Initialize their stats.
-	spawn(function()
+	task.spawn(function()
 		module.Init(player)
 	end)
 end
@@ -915,14 +669,14 @@ local function PlayerRemoving(player)
 	if storage[userId] and not leavingStorage[userId] then
 		leavingStorage[userId] = true
 
-		local _s = clock()
+		local _s = os.clock()
 		repeat
-			wait(0.1)
+			task.wait(0.1)
 			local d = 0
 			if not isStudio then
-				d = max(d, 8)
+				d = math.max(d, 8)
 			end
-		until d <= clock() - _s
+		until d <= os.clock() - _s
 
 		--- Player left! Save their stats (as session ended)
 		module.Save(player or userId, true)
@@ -948,14 +702,14 @@ game.Players.PlayerAdded:Connect(PlayerAdded)
 
 --- Player removing
 game.Players.PlayerRemoving:Connect(function(player)
-	spawn(function()
+	task.spawn(function()
 		player:SetAttribute("__LEAVING", true)
 	end)
 
 	PlayerRemoving(player)
 end)  
 
-spawn(function()
+task.spawn(function()
 	while true do
 		for userId in pairs(storage) do
 			local success, result = pcall(function()
@@ -969,7 +723,7 @@ spawn(function()
 			end
 		end
 
-		wait()
+		task.wait()
 	end
 end)
 
@@ -982,7 +736,7 @@ game.OnClose = function()
 
 	--- Save everyone's stats on server
 	for _, player in ipairs(game.Players:GetPlayers()) do
-		spawn(function()
+		task.spawn(function()
 			module.Save(player, true)
 		end)
 	end
@@ -997,14 +751,14 @@ game.OnClose = function()
 	if not isStudio then
 		for _, player in Players:GetPlayers() do
 			pcall(function()
-				spawn(function()
+				task.spawn(function()
 					Migration.Migrate(player)
 				end)
 			end)
 		end
 
 		print("[SAVING] Waiting 30s for server to shutdown!");
-		wait(30);
+		task.wait(30);
 	end
 end
 
@@ -1013,26 +767,26 @@ end
 
 --- Base save loop
 local _autots 
-spawn(function()
+task.spawn(function()
 	--- Save loop
 	while true do
-		_autots = clock()
+		_autots = os.clock()
 
 		--- Save everyone's stats :D
 		pcall(function()
 			for statsName, statsData in pairs(storage) do
 				if statsData then
-					_autots = clock()
+					_autots = os.clock()
 
 					--- Wait buffer time :)))
-					wait(saveDuration / (#game.Players:GetPlayers() or 1))
+					task.wait(saveDuration / (#game.Players:GetPlayers() or 1))
 
-					_autots = clock()
+					_autots = os.clock()
 
 					local success, result = pcall(function()
 						local player = Players:GetPlayerByUserId(statsName)
 						if player and not leavingStorage[statsName] and storage[statsName] then
-							spawn(function()
+							task.spawn(function()
 								module.Save(player)
 							end)
 						end
@@ -1046,14 +800,14 @@ spawn(function()
 		end)
 
 		--
-		_autots = clock()
-		wait(0.1)
+		_autots = os.clock()
+		task.wait(0.1)
 	end
 end)
 
 
 task.spawn(function()
-	repeat wait(5) until clock() - _autots >= autoSaveBuffer
+	repeat task.wait(5) until os.clock() - _autots >= autoSaveBuffer
 
 	warn("[SAVING] AUTO SAVE STOPPED WORKING - OH ####")
 	Players.PlayerAdded:Connect(function(player)
