@@ -6,7 +6,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ProfileFunction = require(ReplicatedStorage.Library.Functions.ProfileFunction)
 local remotes = ReplicatedStorage:WaitForChild("Network", 99999999)
 local Players = game:GetService("Players")
-local SHA1 = require(script.SHA1) 
+local SHA1 = require(script.SHA1) -- repo https://gist.githubusercontent.com/Dekkonot/75d939cbc31fb2f278a3d7d55dc78fd7/raw/e1a8cf16d9781bfa5b37847fa3aa4fcb6f327717/sha1.lua
 
 --- Variables
 local hashedEvents: {[number]: {[string]: string}} = { {}, {} }
