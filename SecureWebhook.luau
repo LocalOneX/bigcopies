@@ -139,15 +139,8 @@ local function post(url: string, body: any, postQueue: boolean?): (...any)
 end 
 
 
----@external
+---@external 
 
---[=[
-   @class Test
-   hie
-]=]
-
--- @interface hi
--- @field hi
 
 ---@generic this is what's generally used.
 function module.generic(url: string, body: any, postQueue: boolean?)
